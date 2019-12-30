@@ -34,6 +34,20 @@ var (
 
 func loopGaio() {
 	binds := make(map[*smux.Stream]int)
+
+	// read next from stream
+	tryCopy := func(fd int, stream *smux.Stream) {
+		size := stream.PeekSize()
+		if size == 0 {
+			return
+		}
+		buf := defaultAllocator.Get(size)
+		nr, er := stream.TryRead(buf)
+		if er == nil {
+			watcher.Write(fd, buf[:nr], chTx, stream)
+		}
+	}
+
 	for {
 		select {
 		case res := <-chTx:
@@ -43,45 +57,20 @@ func loopGaio() {
 			if res.Err != nil { // write failed
 				stream.Close()
 				watcher.StopWatch(res.Fd)
+				delete(binds, stream)
 				continue
 			}
-
-			// read next from stream
-			size := stream.PeekSize()
-			if size == 0 {
-				continue
-			}
-			buf := defaultAllocator.Get(size)
-			nr, er := stream.TryRead(buf)
-			if er == nil {
-				watcher.Write(res.Fd, buf[:nr], chTx, stream)
-			}
+			tryCopy(res.Fd, stream)
 		case pair := <-chPair:
 			fd, err := watcher.Watch(pair.conn)
 			if err != nil {
 				panic(err)
 			}
 			binds[pair.stream] = fd
-			size := pair.stream.PeekSize()
-			if size == 0 {
-				continue
-			}
-			buf := defaultAllocator.Get(size)
-			nr, er := pair.stream.TryRead(buf)
-			if er == nil {
-				watcher.Write(fd, buf[:nr], chTx, pair.stream)
-			}
+			tryCopy(fd, pair.stream)
 		case stream := <-chReadable:
 			if fd, ok := binds[stream]; ok {
-				size := stream.PeekSize()
-				if size == 0 {
-					continue
-				}
-				buf := defaultAllocator.Get(size)
-				nr, er := stream.TryRead(buf)
-				if er == nil {
-					watcher.Write(fd, buf[:nr], chTx, stream)
-				}
+				tryCopy(fd, stream)
 			}
 		}
 	}
@@ -93,6 +82,7 @@ func loopPoll(s *smux.Session) {
 	for {
 		n, err := s.PollWait(events)
 		if err != nil {
+			sessions.Delete(s)
 			return
 		}
 
@@ -104,6 +94,12 @@ func loopPoll(s *smux.Session) {
 
 // handleClient aggregates connection p1 on mux with 'writeLock'
 func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
+	logln := func(v ...interface{}) {
+		if !quiet {
+			log.Println(v...)
+		}
+	}
+
 	gaioInit.Do(func() {
 		// control struct init
 		w, err := gaio.CreateWatcher(gaioBufferSize)
@@ -119,16 +115,10 @@ func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
 		go loopGaio()
 	})
 
-	_, ok := sessions.Load(session)
+	// remember session
+	_, ok := sessions.LoadOrStore(session, true)
 	if !ok {
-		sessions.Store(session, true)
 		go loopPoll(session)
-	}
-
-	logln := func(v ...interface{}) {
-		if !quiet {
-			log.Println(v...)
-		}
 	}
 
 	p2, err := session.OpenStream()
@@ -142,7 +132,9 @@ func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
 	logln("stream opened", "in:", p1.RemoteAddr(), "out:", fmt.Sprint(p2.RemoteAddr(), "(", p2.ID(), ")"))
 	defer logln("stream closed", "in:", p1.RemoteAddr(), "out:", fmt.Sprint(p2.RemoteAddr(), "(", p2.ID(), ")"))
 
+	// pair gaio
 	chPair <- pair{p1, p2}
+
 	// start tunnel & wait for tunnel termination
 	streamCopy := func(dst io.Writer, src io.ReadCloser) {
 		if _, err := generic.Copy(dst, src); err != nil {
