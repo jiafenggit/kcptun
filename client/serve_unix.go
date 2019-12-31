@@ -43,9 +43,11 @@ func loopGaio() {
 		}
 		buf := defaultAllocator.Get(size)
 		nr, er := stream.TryRead(buf)
-		if er == nil {
-			watcher.Write(fd, buf[:nr], chTx, stream)
+		if er != nil { // read error, delete
+			delete(binds, stream)
+			return
 		}
+		watcher.Write(fd, buf[:nr], chTx, stream)
 	}
 
 	for {
@@ -100,8 +102,8 @@ func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
 		}
 	}
 
+	// global async-io
 	gaioInit.Do(func() {
-		// control struct init
 		w, err := gaio.CreateWatcher(gaioBufferSize)
 		if err != nil {
 			panic(err)
@@ -132,10 +134,10 @@ func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
 	logln("stream opened", "in:", p1.RemoteAddr(), "out:", fmt.Sprint(p2.RemoteAddr(), "(", p2.ID(), ")"))
 	defer logln("stream closed", "in:", p1.RemoteAddr(), "out:", fmt.Sprint(p2.RemoteAddr(), "(", p2.ID(), ")"))
 
-	// pair gaio
+	// p2 -> p1, async method
 	chPair <- pair{p1, p2}
 
-	// start tunnel & wait for tunnel termination
+	// p1 -> p2, blocking method
 	streamCopy := func(dst io.Writer, src io.ReadCloser) {
 		if _, err := generic.Copy(dst, src); err != nil {
 			// report protocol error
