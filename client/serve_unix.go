@@ -14,10 +14,6 @@ import (
 	"github.com/xtaci/smux"
 )
 
-const (
-	gaioBufferSize = 65536
-)
-
 type pair struct {
 	conn   net.Conn
 	stream *smux.Stream
@@ -104,7 +100,7 @@ func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
 
 	// global async-io
 	gaioInit.Do(func() {
-		w, err := gaio.CreateWatcher(gaioBufferSize)
+		w, err := gaio.CreateWatcher(bufSize)
 		if err != nil {
 			panic(err)
 		}
