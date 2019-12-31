@@ -23,12 +23,21 @@ var (
 	gaioInit   sync.Once
 	chPair     chan pair
 	chReadable chan *smux.Stream
-	chTx       chan gaio.OpResult
+	chComplete chan gaio.OpResult
 	watcher    *gaio.Watcher
 	sessions   sync.Map
 )
 
 func loopGaio() {
+	go func() {
+		for {
+			res, err := watcher.WaitIO()
+			if err != nil {
+				return
+			}
+			chComplete <- res
+		}
+	}()
 	binds := make(map[*smux.Stream]int)
 
 	// read next from stream
@@ -43,22 +52,25 @@ func loopGaio() {
 			delete(binds, stream)
 			return
 		}
-		watcher.Write(fd, buf[:nr], chTx, stream)
+		watcher.Write(stream, fd, buf[:nr])
 	}
 
 	for {
 		select {
-		case res := <-chTx:
-			defaultAllocator.Put(res.Buffer)
-			stream := res.Context.(*smux.Stream)
+		case res := <-chComplete:
+			switch res.Op {
+			case gaio.OpWrite:
+				defaultAllocator.Put(res.Buffer)
+				stream := res.Context.(*smux.Stream)
 
-			if res.Err != nil { // write failed
-				stream.Close()
-				watcher.StopWatch(res.Fd)
-				delete(binds, stream)
-				continue
+				if res.Err != nil { // write failed
+					stream.Close()
+					watcher.StopWatch(res.Fd)
+					delete(binds, stream)
+					continue
+				}
+				tryCopy(res.Fd, stream)
 			}
-			tryCopy(res.Fd, stream)
 		case pair := <-chPair:
 			fd, err := watcher.Watch(pair.conn)
 			if err != nil {
@@ -105,7 +117,7 @@ func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
 			panic(err)
 		}
 
-		chTx = make(chan gaio.OpResult)
+		chComplete = make(chan gaio.OpResult)
 		chReadable = make(chan *smux.Stream)
 		chPair = make(chan pair)
 		watcher = w
