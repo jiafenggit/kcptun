@@ -65,14 +65,14 @@ func loopGaio() {
 
 				if res.Err != nil { // write failed
 					stream.Close()
-					watcher.StopWatch(res.Fd)
+					watcher.CloseConn(res.Fd)
 					delete(binds, stream)
 					continue
 				}
 				tryCopy(res.Fd, stream)
 			}
 		case pair := <-chPair:
-			fd, err := watcher.Watch(pair.conn)
+			fd, err := watcher.NewConn(pair.conn)
 			if err != nil {
 				panic(err)
 			}
