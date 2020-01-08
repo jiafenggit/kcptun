@@ -38,10 +38,10 @@ func loopGaio() {
 			chComplete <- res
 		}
 	}()
-	binds := make(map[*smux.Stream]int)
+	binds := make(map[*smux.Stream]net.Conn)
 
 	// read next from stream
-	tryCopy := func(fd int, stream *smux.Stream) {
+	tryCopy := func(conn net.Conn, stream *smux.Stream) {
 		size := stream.PeekSize()
 		if size == 0 {
 			return
@@ -52,7 +52,7 @@ func loopGaio() {
 			delete(binds, stream)
 			return
 		}
-		watcher.Write(stream, fd, buf[:nr])
+		watcher.Write(stream, conn, buf[:nr])
 	}
 
 	for {
@@ -65,22 +65,18 @@ func loopGaio() {
 
 				if res.Err != nil { // write failed
 					stream.Close()
-					watcher.CloseConn(res.Fd)
+					res.Conn.Close()
 					delete(binds, stream)
 					continue
 				}
-				tryCopy(res.Fd, stream)
+				tryCopy(res.Conn, stream)
 			}
 		case pair := <-chPair:
-			fd, err := watcher.NewConn(pair.conn)
-			if err != nil {
-				panic(err)
-			}
-			binds[pair.stream] = fd
-			tryCopy(fd, pair.stream)
+			binds[pair.stream] = pair.conn
+			tryCopy(pair.conn, pair.stream)
 		case stream := <-chReadable:
-			if fd, ok := binds[stream]; ok {
-				tryCopy(fd, stream)
+			if conn, ok := binds[stream]; ok {
+				tryCopy(conn, stream)
 			}
 		}
 	}
@@ -112,7 +108,7 @@ func handleClient(session *smux.Session, p1 net.Conn, quiet bool) {
 
 	// global async-io
 	gaioInit.Do(func() {
-		w, err := gaio.CreateWatcher(bufSize)
+		w, err := gaio.NewWatcher(bufSize)
 		if err != nil {
 			panic(err)
 		}
